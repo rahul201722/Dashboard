@@ -27,17 +27,26 @@ def create_episodes_vs_year_plot(df: pd.DataFrame) -> plt.Figure:
     """
     fig, ax = plt.subplots(figsize=config.CHART_CONFIG['figure_size'])
     
-    # Handle missing genre data
+    # Handle missing genre data or use first genre only for coloring
     if 'genres' in df.columns and df['genres'].notna().any():
+        # Extract first genre for coloring to avoid cluttered legend
+        df_plot = df.copy()
+        df_plot['primary_genre'] = df_plot['genres'].str.split(',').str[0]
+        
+        # Limit to top 10 genres to avoid legend clutter
+        top_genres = df_plot['primary_genre'].value_counts().head(10).index
+        df_plot_filtered = df_plot[df_plot['primary_genre'].isin(top_genres)]
+        
         sns.scatterplot(
-            data=df, 
+            data=df_plot_filtered, 
             x='startYear', 
             y='num_episodes', 
-            hue='genres', 
+            hue='primary_genre', 
             ax=ax, 
             palette=config.COLOR_PALETTES['primary'],
             alpha=0.7
         )
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     else:
         sns.scatterplot(
             data=df, 
@@ -178,12 +187,22 @@ def create_interactive_scatter_plot(df: pd.DataFrame) -> go.Figure:
         Plotly figure
     """
     if 'startYear' in df.columns and 'num_episodes' in df.columns:
+        # Prepare data for plotting
+        df_plot = df.copy()
+        
+        # Extract primary genre for coloring if genres exist
+        if 'genres' in df.columns and df['genres'].notna().any():
+            df_plot['primary_genre'] = df_plot['genres'].str.split(',').str[0]
+            color_col = 'primary_genre'
+        else:
+            color_col = None
+        
         fig = px.scatter(
-            df, 
+            df_plot, 
             x='startYear', 
             y='num_episodes',
-            color='genres' if 'genres' in df.columns else None,
-            hover_data=['primaryTitle', 'runtimeMinutes'] if 'primaryTitle' in df.columns else None,
+            color=color_col,
+            hover_data=['primaryTitle', 'runtimeMinutes', 'genres'] if 'primaryTitle' in df.columns else None,
             title='Interactive: Episodes vs Start Year'
         )
         
