@@ -1,87 +1,265 @@
-import pandas as pd
-
-# Load the dataset
-basics = pd.read_csv('title.basics.tsv', sep='\t', low_memory=False)
-episodes = pd.read_csv('title.episode.tsv', sep='\t', low_memory=False)
-
-# Group by parentTconst to find shows with 1 season or less
-one_season_shows = episodes.groupby('parentTconst').size()
-one_season_shows = one_season_shows[one_season_shows <= 20]  # Assuming <=10 episodes indicates 1 season
-
-# Convert the Series to a DataFrame and rename the column
-one_season_shows = one_season_shows.reset_index(name='num_episodes')
-
-# Merge with title basics for additional information
-one_season_info = pd.merge(one_season_shows, basics, left_on='parentTconst', right_on='tconst')
-
-# Display the resulting DataFrame
-print(one_season_info.head())
+"""
+TV Shows Analysis Dashboard - Main Application
+A comprehensive Streamlit dashboard for analyzing one-season TV shows
+"""
 
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
+import sys
+import os
 
-# Load the data (Use the processed DataFrame `one_season_info`)
-# If you saved the processed data to a CSV file, you could load it like this:
-# df = pd.read_csv('one_season_shows_processed.csv')
-# Assuming `one_season_info` is already available in your environment
+# Add the current directory to Python path for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# For the purpose of this code, we'll assume `one_season_info` is already loaded:
-df = one_season_info  # Use the processed DataFrame
+import config
+from utils.data_loader import get_data
+from utils.data_processor import (
+    process_one_season_shows, 
+    split_genres, 
+    get_summary_stats,
+    get_shows_by_year_range,
+    get_top_shows_by_metric
+)
+from utils.visualizations import (
+    create_episodes_vs_year_plot,
+    create_genre_distribution_plot,
+    create_shows_over_time_plot,
+    create_runtime_analysis_plot,
+    create_interactive_scatter_plot,
+    create_genre_treemap
+)
 
-df.replace('\\N', pd.NA, inplace=True)
+# Configure Streamlit page
+st.set_page_config(**config.PAGE_CONFIG)
 
-# Convert numeric columns
-df['startYear'] = pd.to_numeric(df['startYear'], errors='coerce')
-df['endYear'] = pd.to_numeric(df['endYear'], errors='coerce')
-df['runtimeMinutes'] = pd.to_numeric(df['runtimeMinutes'], errors='coerce')
+def load_and_process_data():
+    """Load and process the TV shows data"""
+    try:
+        with st.spinner('Loading and processing data...'):
+            # Load data
+            basics, episodes = get_data()
+            
+            # Process one-season shows
+            df = process_one_season_shows(basics, episodes)
+            
+            # Create exploded genres version for some visualizations
+            df_genres = split_genres(df)
+            
+            return df, df_genres
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None, None
 
-# Set the title and layout of the Streamlit app
-st.title('One-Season TV Shows Analysis Dashboard')
+def create_sidebar_filters(df):
+    """Create sidebar filters for data exploration"""
+    st.sidebar.header("🔍 Data Filters")
+    
+    # Year range filter
+    if 'startYear' in df.columns and df['startYear'].notna().any():
+        min_year = int(df['startYear'].min())
+        max_year = int(df['startYear'].max())
+        
+        year_range = st.sidebar.slider(
+            "Select Year Range",
+            min_value=min_year,
+            max_value=max_year,
+            value=(min_year, max_year),
+            step=1
+        )
+    else:
+        year_range = (1990, 2023)
+    
+    # Genre filter
+    if 'genres' in df.columns:
+        available_genres = df['genres'].str.split(',').explode().str.strip().dropna().unique()
+        selected_genres = st.sidebar.multiselect(
+            "Select Genres",
+            options=sorted(available_genres),
+            default=[]
+        )
+    else:
+        selected_genres = []
+    
+    # Episode count filter
+    if 'num_episodes' in df.columns:
+        max_episodes = int(df['num_episodes'].max())
+        episode_range = st.sidebar.slider(
+            "Episode Count Range",
+            min_value=1,
+            max_value=max_episodes,
+            value=(1, max_episodes),
+            step=1
+        )
+    else:
+        episode_range = (1, 20)
+    
+    return year_range, selected_genres, episode_range
 
-# First Visualization: Number of Episodes vs. Start Year
-st.subheader('Number of Episodes vs. Start Year')
-fig, ax = plt.subplots()
-sns.scatterplot(data=df, x='startYear', y='num_episodes', hue='genres', ax=ax, palette='viridis')
-ax.set_xlabel('Start Year')
-ax.set_ylabel('Number of Episodes')
-st.pyplot(fig)
+def apply_filters(df, year_range, selected_genres, episode_range):
+    """Apply selected filters to the dataframe"""
+    filtered_df = df.copy()
+    
+    # Apply year filter
+    if 'startYear' in filtered_df.columns:
+        filtered_df = filtered_df[
+            (filtered_df['startYear'] >= year_range[0]) & 
+            (filtered_df['startYear'] <= year_range[1])
+        ]
+    
+    # Apply genre filter
+    if selected_genres and 'genres' in filtered_df.columns:
+        genre_mask = filtered_df['genres'].str.contains('|'.join(selected_genres), na=False)
+        filtered_df = filtered_df[genre_mask]
+    
+    # Apply episode count filter
+    if 'num_episodes' in filtered_df.columns:
+        filtered_df = filtered_df[
+            (filtered_df['num_episodes'] >= episode_range[0]) & 
+            (filtered_df['num_episodes'] <= episode_range[1])
+        ]
+    
+    return filtered_df
 
-# Second Visualization: Distribution of Genres
-st.subheader('Distribution of Genres in One-Season Shows')
-genre_data = df.explode('genres')
-fig, ax = plt.subplots()
-sns.countplot(y='genres', data=genre_data, order=genre_data['genres'].value_counts().index, palette='pastel')
-ax.set_xlabel('Number of Shows')
-ax.set_ylabel('Genres')
-st.pyplot(fig)
+def display_summary_stats(df):
+    """Display summary statistics in the sidebar"""
+    st.sidebar.header("📊 Dataset Summary")
+    
+    stats = get_summary_stats(df)
+    
+    col1, col2 = st.sidebar.columns(2)
+    
+    with col1:
+        st.metric("Total Shows", stats['total_shows'])
+        if stats['avg_episodes']:
+            st.metric("Avg Episodes", f"{stats['avg_episodes']:.1f}")
+    
+    with col2:
+        st.metric("Unique Genres", stats['unique_genres'])
+        if stats['avg_runtime']:
+            st.metric("Avg Runtime", f"{stats['avg_runtime']:.0f} min")
+    
+    if stats['year_range']['min'] and stats['year_range']['max']:
+        st.sidebar.info(f"📅 Year Range: {stats['year_range']['min']} - {stats['year_range']['max']}")
 
-# Third Visualization: Number of One-Season Shows Over Time
-st.subheader('Number of One-Season Shows Over Time')
-shows_per_year = df.groupby('startYear').size().reset_index(name='counts')
-fig, ax = plt.subplots()
-sns.lineplot(data=shows_per_year, x='startYear', y='counts', marker='o', ax=ax)
-ax.set_ylabel('Number of Shows')
-ax.set_xlabel('Year')
-st.pyplot(fig)
+def main():
+    """Main application function"""
+    
+    # App header
+    st.title("📺 TV Shows Analysis Dashboard")
+    st.markdown("""
+    Explore patterns and trends in one-season TV shows. Use the sidebar to filter data 
+    and discover insights about show genres, runtime, and temporal trends.
+    """)
+    
+    # Load data
+    df, df_genres = load_and_process_data()
+    
+    if df is None:
+        st.error("Failed to load data. Please check your data files.")
+        return
+    
+    # Create sidebar filters
+    year_range, selected_genres, episode_range = create_sidebar_filters(df)
+    
+    # Apply filters
+    filtered_df = apply_filters(df, year_range, selected_genres, episode_range)
+    filtered_df_genres = apply_filters(df_genres, year_range, selected_genres, episode_range)
+    
+    # Display summary stats
+    display_summary_stats(filtered_df)
+    
+    # Check if filtered data is empty
+    if len(filtered_df) == 0:
+        st.warning("No data matches the selected filters. Please adjust your filter settings.")
+        return
+    
+    # Main content area
+    st.header("🔍 Data Overview")
+    
+    # Display sample data
+    with st.expander("View Sample Data"):
+        st.dataframe(filtered_df.head(10))
+    
+    # Key metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Shows in Selection", len(filtered_df))
+    
+    with col2:
+        if 'num_episodes' in filtered_df.columns:
+            avg_episodes = filtered_df['num_episodes'].mean()
+            st.metric("Avg Episodes", f"{avg_episodes:.1f}")
+    
+    with col3:
+        if 'runtimeMinutes' in filtered_df.columns:
+            avg_runtime = filtered_df['runtimeMinutes'].mean()
+            st.metric("Avg Runtime", f"{avg_runtime:.0f} min")
+    
+    with col4:
+        if 'startYear' in filtered_df.columns:
+            latest_year = filtered_df['startYear'].max()
+            st.metric("Latest Year", int(latest_year) if pd.notna(latest_year) else "N/A")
+    
+    # Visualizations
+    st.header("📈 Visualizations")
+    
+    # Create tabs for different visualization categories
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Basic Charts", "🎭 Genre Analysis", "⏱️ Time Trends", "🎯 Interactive"])
+    
+    with tab1:
+        st.subheader("Episodes vs Start Year")
+        fig1 = create_episodes_vs_year_plot(filtered_df)
+        st.pyplot(fig1)
+        
+        st.subheader("Top 10 Longest Runtime Shows")
+        fig4 = create_runtime_analysis_plot(filtered_df)
+        st.pyplot(fig4)
+    
+    with tab2:
+        st.subheader("Genre Distribution")
+        fig2 = create_genre_distribution_plot(filtered_df_genres)
+        st.pyplot(fig2)
+        
+        st.subheader("Genre Distribution (Interactive Treemap)")
+        fig_treemap = create_genre_treemap(filtered_df_genres)
+        st.plotly_chart(fig_treemap, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Shows Released Over Time")
+        fig3 = create_shows_over_time_plot(filtered_df)
+        st.pyplot(fig3)
+        
+        # Additional time-based analysis
+        if 'startYear' in filtered_df.columns and filtered_df['startYear'].notna().any():
+            st.subheader("Shows by Decade")
+            filtered_df_decade = filtered_df.copy()
+            filtered_df_decade['decade'] = (filtered_df_decade['startYear'] // 10) * 10
+            decade_counts = filtered_df_decade['decade'].value_counts().sort_index()
+            st.bar_chart(decade_counts)
+    
+    with tab4:
+        st.subheader("Interactive Scatter Plot")
+        fig_interactive = create_interactive_scatter_plot(filtered_df)
+        st.plotly_chart(fig_interactive, use_container_width=True)
+        
+        # Data exploration tool
+        st.subheader("Data Explorer")
+        if st.checkbox("Show detailed data table"):
+            st.dataframe(
+                filtered_df.sort_values('startYear', ascending=False) if 'startYear' in filtered_df.columns else filtered_df,
+                use_container_width=True
+            )
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    **Data Source:** IMDB Dataset  
+    **Dashboard Created With:** Streamlit, Pandas, Matplotlib, Seaborn, Plotly  
+    **Note:** Sample data is used when original IMDB files are not available.
+    """)
 
-# Fourth Visualization: Longest Runtime One-Season Shows
-st.subheader('Longest Runtime One-Season Shows')
-top_runtime_shows = df.nlargest(10, 'runtimeMinutes')
-fig, ax = plt.subplots()
-sns.barplot(data=top_runtime_shows, x='runtimeMinutes', y='primaryTitle', ax=ax, palette='magma')
-ax.set_xlabel('Runtime (minutes)')
-ax.set_ylabel('Show Title')
-st.pyplot(fig)
-
-# Fifth Visualization: Genres by Start Year
-st.subheader('Genres by Start Year')
-fig, ax = plt.subplots()
-sns.boxplot(x='startYear', y='genres', data=genre_data, palette='coolwarm')
-ax.set_xlabel('Start Year')
-ax.set_ylabel('Genres')
-st.pyplot(fig)
-
-st.markdown("**Data Source:** IMDB")
+if __name__ == "__main__":
+    main()
 
